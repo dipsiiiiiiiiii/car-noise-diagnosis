@@ -135,7 +135,7 @@ class CarNoiseDiagnosisSystem:
                 print("🔧 기계음 위주 감지됨")
             
             # 3. MediaPipe로 기본 분류 (원본과 필터링된 버전 모두)
-            print("🤖 MediaPipe YAMNet 분류 중...")
+            print("🤖 YAMNet 분류 중...")
             mediapipe_results_original = self.classifier.classify_audio(audio_data, sample_rate)
             
             # YAMNet 원본 분류 결과 즉시 표시
@@ -316,7 +316,8 @@ class CarNoiseDiagnosisSystem:
             # 차량 관련 소리만 별도
             vehicle_sounds = self.classifier.filter_vehicle_sounds(result['mediapipe_results'])
             if vehicle_sounds:
-                print(f"🚗 차량음: {', '.join([f'{s[\"category_name\"]}({s[\"score\"]:.0%})' for s in vehicle_sounds[:3]])}")
+                vehicle_list = [f"{s['category_name']}({s['score']:.0%})" for s in vehicle_sounds[:3]]
+                print(f"🚗 차량음: {', '.join(vehicle_list)}")
         else:
             print("❌ YAMNet 분류 결과 없음")
         

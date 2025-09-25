@@ -79,7 +79,7 @@ class CarNoiseDiagnoser:
         return rules
     
     def diagnose(self, audio_features: Dict, mediapipe_results: List[Dict]) -> Dict:
-        """Perform comprehensive diagnosis based on audio features and ML results"""
+        """Perform comprehensive diagnosis based on YAMNet results and audio features"""
         diagnosis = {
             'overall_status': CarPartStatus.NORMAL,
             'issues': [],
@@ -89,23 +89,21 @@ class CarNoiseDiagnoser:
             'part_analysis': {}
         }
         
-        # Analyze MediaPipe results
+        # Analyze MediaPipe results first (primary source)
         vehicle_sounds = self._filter_vehicle_sounds(mediapipe_results)
         diagnosis['detected_sounds'] = vehicle_sounds
         
-        # Apply rule-based diagnosis
-        triggered_rules = self._apply_rules(audio_features)
+        # YAMNet 기반 진단 (우선순위)
+        yamnet_issues = self._diagnose_from_yamnet(vehicle_sounds)
         
-        # Combine results
-        all_issues = []
-        for rule in triggered_rules:
-            issue = {
-                'part': rule.part.value,
-                'status': rule.status.value,
-                'description': rule.description,
-                'confidence': self._calculate_confidence(rule, audio_features)
-            }
-            all_issues.append(issue)
+        # 주파수 분석 기반 진단 (보조)
+        audio_issues = self._diagnose_from_audio_features(audio_features, vehicle_sounds)
+        
+        # YAMNet 결과가 있으면 우선, 없으면 주파수 분석 사용
+        if yamnet_issues:
+            all_issues = yamnet_issues
+        else:
+            all_issues = audio_issues
             
         # Sort by severity and confidence
         all_issues.sort(key=lambda x: (
@@ -126,6 +124,77 @@ class CarNoiseDiagnoser:
         diagnosis['confidence'] = self._calculate_overall_confidence(all_issues, vehicle_sounds)
         
         return diagnosis
+    
+    def _diagnose_from_yamnet(self, vehicle_sounds: List[Dict]) -> List[Dict]:
+        """YAMNet 결과 기반 진단"""
+        issues = []
+        
+        if not vehicle_sounds:
+            return issues
+            
+        for sound in vehicle_sounds:
+            sound_type = sound.get('sound_type', '').lower()
+            confidence = sound.get('confidence', 0)
+            part = sound.get('part', '알 수 없음')
+            
+            # 구체적인 차량 문제 신호들
+            if 'engine knocking' in sound_type:
+                issues.append({
+                    'part': CarPart.ENGINE.value,
+                    'status': CarPartStatus.CRITICAL.value,
+                    'description': f"엔진 노킹 감지 - 즉시 정비 필요 (YAMNet: {confidence:.1%})",
+                    'confidence': min(0.95, confidence + 0.2)
+                })
+            elif 'brake squeal' in sound_type or 'squeal' in sound_type:
+                issues.append({
+                    'part': CarPart.BRAKE.value,
+                    'status': CarPartStatus.WARNING.value,
+                    'description': f"브레이크 삐걱거림 감지 - 브레이크 점검 권장 (YAMNet: {confidence:.1%})",
+                    'confidence': min(0.9, confidence + 0.1)
+                })
+            elif 'rattle' in sound_type or 'clatter' in sound_type:
+                issues.append({
+                    'part': CarPart.UNKNOWN.value,
+                    'status': CarPartStatus.WARNING.value,
+                    'description': f"기계적 잡음 감지 - 부품 점검 권장 (YAMNet: {confidence:.1%})",
+                    'confidence': confidence
+                })
+            elif 'heavy engine' in sound_type:
+                issues.append({
+                    'part': CarPart.ENGINE.value,
+                    'status': CarPartStatus.WARNING.value,
+                    'description': f"엔진 부하 증가 감지 - 엔진 상태 점검 권장 (YAMNet: {confidence:.1%})",
+                    'confidence': confidence
+                })
+            elif confidence > 0.1 and ('engine' in sound_type or 'vehicle' in sound_type):
+                # 일반적인 차량음은 정상으로 처리
+                pass
+                
+        return issues
+    
+    def _diagnose_from_audio_features(self, audio_features: Dict, vehicle_sounds: List[Dict]) -> List[Dict]:
+        """주파수 분석 기반 진단 (YAMNet 결과가 없을 때만 사용)"""
+        issues = []
+        
+        # 차량 소음이 감지되지 않으면 주파수 분석도 하지 않음
+        if not vehicle_sounds:
+            return issues
+            
+        # 기존의 규칙 기반 진단 (조건을 더 엄격하게)
+        triggered_rules = self._apply_rules(audio_features)
+        
+        for rule in triggered_rules:
+            # 더 엄격한 조건으로 필터링
+            confidence = self._calculate_confidence(rule, audio_features)
+            if confidence > 0.8:  # 신뢰도가 높을 때만
+                issues.append({
+                    'part': rule.part.value,
+                    'status': rule.status.value,
+                    'description': f"{rule.description} (주파수 분석)",
+                    'confidence': confidence * 0.7  # YAMNet보다 낮은 가중치
+                })
+                
+        return issues
     
     def _filter_vehicle_sounds(self, mediapipe_results: List[Dict]) -> List[Dict]:
         """Filter and categorize vehicle-related sounds"""

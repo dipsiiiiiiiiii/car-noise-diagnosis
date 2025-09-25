@@ -34,12 +34,9 @@ class MediaPipeAudioClassifier:
                 score_threshold=score_threshold
             )
             
-            print("MediaPipe YAMNet 모델 로딩 중...")
-            print(f"모델 파일: {model_path}")
-            print(f"최대 결과: {max_results}, 임계값: {score_threshold}")
-            
+            print("🤖 YAMNet 모델 로딩 중...")            
             self.classifier = audio.AudioClassifier.create_from_options(self.options)
-            print("✅ 모델 로딩 완료")
+            print("✅ YAMNet 로딩 완료")
             self.latest_result = None
             
         except Exception as e:
@@ -57,66 +54,37 @@ class MediaPipeAudioClassifier:
             List of classification results with categories and scores
         """
         try:
-            print(f"🔧 classify_audio 시작: 데이터 길이 {len(audio_data) if audio_data is not None else 'None'}")
-            
             # Validate input data
             if audio_data is None or len(audio_data) == 0:
-                print("❌ 빈 오디오 데이터")
                 return []
-            
-            print(f"원본 데이터: dtype={audio_data.dtype}, shape={audio_data.shape}, range=[{np.min(audio_data):.3f}, {np.max(audio_data):.3f}]")
             
             # Convert to the format expected by MediaPipe
             if audio_data.dtype != np.float32:
-                print("데이터 타입을 float32로 변환")
                 audio_data = audio_data.astype(np.float32)
                 
             # Ensure audio is in [-1, 1] range
             max_val = np.max(np.abs(audio_data))
             if max_val > 1.0:
-                print(f"정규화: {max_val:.3f} -> 1.0")
                 audio_data = audio_data / max_val
             elif max_val == 0:
-                print("❌ 무음 오디오 데이터")
                 return []
             
             # Ensure minimum length and reasonable maximum
-            original_len = len(audio_data)
             if len(audio_data) < 1024:
                 audio_data = np.pad(audio_data, (0, 1024 - len(audio_data)))
-                print(f"패딩: {original_len} -> {len(audio_data)}")
             elif len(audio_data) > 16000 * 10:  # Limit to 10 seconds max
                 audio_data = audio_data[:16000 * 10]
-                print(f"자르기: {original_len} -> {len(audio_data)}")
-            
-            # Validate sample rate
-            if sample_rate != 16000:
-                print(f"⚠️  샘플 레이트: {sample_rate}Hz (YAMNet 최적화: 16kHz)")
             
             # Ensure the audio data is properly formatted for MediaPipe
             # YAMNet expects mono audio
             if len(audio_data.shape) > 1:
-                print(f"스테레오 -> 모노: {audio_data.shape}")
                 audio_data = np.mean(audio_data, axis=1)
             
-            print(f"최종 데이터: shape={audio_data.shape}, range=[{np.min(audio_data):.3f}, {np.max(audio_data):.3f}]")
-            
             # Create AudioData using official MediaPipe containers
-            print("AudioData 컨테이너 생성 중...")
             AudioData = mp.tasks.components.containers.AudioData
-            
-            print(f"create_from_array 호출: data.shape={audio_data.shape}, sr={sample_rate}")
-            audio_container = AudioData.create_from_array(
-                audio_data, sample_rate
-            )
-            print("✅ AudioData 컨테이너 생성 완료")
-            
-            # Run classification with error handling
-            print("🤖 분류 실행 중...")
             
             # Try to prevent segfault by ensuring data is continuous and aligned
             audio_data_copy = np.ascontiguousarray(audio_data.copy())
-            print(f"연속 메모리 확보: {audio_data_copy.flags}")
             
             # Create new container with copy
             audio_container_safe = AudioData.create_from_array(
@@ -124,47 +92,32 @@ class MediaPipeAudioClassifier:
             )
             
             result = self.classifier.classify(audio_container_safe)
-            print("✅ 분류 완료")
-            print(f"분류 결과 타입: {type(result)}")
-            print(f"결과 속성: {dir(result) if result else 'None'}")
             
             # Process results
             classifications = []
-            if result and hasattr(result, 'classifications') and result.classifications:
-                print(f"분류 개수: {len(result.classifications)}")
-                for i, classification in enumerate(result.classifications):
-                    print(f"분류 {i}: {len(classification.categories)}개 카테고리")
-            elif result:
-                print(f"❌ 분류 결과가 빈 리스트입니다. 길이: {len(result)}")
-                # MediaPipe 0.10.x에서는 다른 구조일 수 있음
-                if isinstance(result, list) and len(result) > 0:
-                    print(f"리스트 첫 번째 요소: {type(result[0])}")
-                    print(f"리스트 첫 번째 요소 속성: {dir(result[0])}")
-            else:
-                print("❌ 분류 결과가 None입니다")
                 
-            if result and hasattr(result, 'classifications') and result.classifications:
-                for classification in result.classifications:
-                    categories = []
-                    for category in classification.categories:
-                        categories.append({
-                            'category_name': category.category_name,
-                            'score': category.score,
-                            'display_name': getattr(category, 'display_name', category.category_name)
+            # MediaPipe 0.10.x 버전에 맞게 수정 - 실제 분류 결과 처리
+            if result and isinstance(result, list) and len(result) > 0:
+                first_result = result[0]
+                if hasattr(first_result, 'classifications') and first_result.classifications:
+                    for classification in first_result.classifications:
+                        categories = []
+                        for category in classification.categories:
+                            categories.append({
+                                'category_name': category.category_name,
+                                'score': category.score,
+                                'display_name': getattr(category, 'display_name', category.category_name)
+                            })
+                        classifications.append({
+                            'head_index': getattr(classification, 'head_index', 0),
+                            'head_name': getattr(classification, 'head_name', 'default'),
+                            'categories': categories
                         })
-                    classifications.append({
-                        'head_index': getattr(classification, 'head_index', 0),
-                        'head_name': getattr(classification, 'head_name', 'default'),
-                        'categories': categories
-                    })
                     
             return classifications
             
         except Exception as e:
             print(f"MediaPipe 분류 오류: {e}")
-            import traceback
-            traceback.print_exc()
-            # Return empty result on error
             return []
     
     def get_top_predictions(self, classifications: List[Dict], top_k: int = 5) -> List[Dict]:
