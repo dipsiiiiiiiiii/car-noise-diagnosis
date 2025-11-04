@@ -18,24 +18,37 @@ from diagnosis.analyzer import CarNoiseDiagnoser, CarPartStatus
 
 
 class CarNoiseDiagnosisSystem:
-    def __init__(self, debug_mode=False):
+    def __init__(self, debug_mode=False, comparison_mode=False):
         self.audio_capture = AudioCapture()
         self.debug_mode = debug_mode
-        
+        self.comparison_mode = comparison_mode
+
         # YAMNet 모델 경로 설정
-        model_path = Path(__file__).parent / "data" / "models" / "yamnet.tflite"
-        if not model_path.exists():
-            print(f"⚠️  모델 파일이 없습니다: {model_path}")
+        yamnet_model_path = Path(__file__).parent / "data" / "models" / "yamnet.tflite"
+        if not yamnet_model_path.exists():
+            print(f"⚠️  모델 파일이 없습니다: {yamnet_model_path}")
             print("YAMNet 모델을 다운로드하려면 다음 명령어를 실행하세요:")
             print("curl -L 'https://storage.googleapis.com/mediapipe-models/audio_classifier/yamnet/float32/1/yamnet.tflite' -o data/models/yamnet.tflite")
-            
+
         self.classifier = MediaPipeAudioClassifier(
-            model_path=str(model_path), 
-            max_results=10, 
+            model_path=str(yamnet_model_path),
+            max_results=10,
             score_threshold=0.0  # 모든 결과 보기
         )
         self.preprocessor = AudioPreprocessor()
-        self.diagnoser = CarNoiseDiagnoser()
+
+        # Custom classifier 경로 (학습된 모델)
+        custom_model_path = Path(__file__).parent / "data" / "models" / "car_classifier.pkl"
+        self.diagnoser = CarNoiseDiagnoser(
+            model_path=str(custom_model_path) if custom_model_path.exists() else None
+        )
+
+        # Show comparison mode status
+        if self.comparison_mode and self.diagnoser.mode == "custom":
+            print("🔄 비교 모드 활성화: Baseline과 Custom 모델을 동시에 비교합니다.")
+        elif self.comparison_mode:
+            print("⚠️  비교 모드는 Custom 모델이 있을 때만 작동합니다.")
+            self.comparison_mode = False
         
     def analyze_audio_file(self, file_path: str) -> dict:
         """파일에서 오디오를 로드하여 분석"""
@@ -122,84 +135,58 @@ class CarNoiseDiagnosisSystem:
     def _analyze_audio_data(self, audio_data: np.ndarray, sample_rate: int) -> dict:
         """오디오 데이터 분석"""
         try:
-            # 1. 음성 활동 감지
-            print("음향 환경 분석 중...")
-            voice_analysis = self.preprocessor.detect_voice_activity(audio_data, sample_rate)
-            
-            # 2. 배경 소음 필터링 (음성이 감지되면)
-            processed_audio = audio_data
-            if voice_analysis['voice_detected']:
-                print(f"🎤 혼합 음향 감지됨 ({voice_analysis['audio_type']}) - 필터링 적용")
-                processed_audio = self.preprocessor.filter_background_noise(audio_data, sample_rate)
-            else:
-                print("🔧 기계음 위주 감지됨")
-            
-            # 3. MediaPipe로 기본 분류 (원본과 필터링된 버전 모두)
+            # 1. YAMNet 분류 (직접 분류, 필터링 없음 - 실험적 검증 결과)
             print("🤖 YAMNet 분류 중...")
-            mediapipe_results_original = self.classifier.classify_audio(audio_data, sample_rate)
-            
-            # YAMNet 원본 분류 결과 즉시 표시
-            if mediapipe_results_original:
-                top_10 = self.classifier.get_top_predictions(mediapipe_results_original, top_k=10)
+            mediapipe_results = self.classifier.classify_audio(audio_data, sample_rate)
+
+            # YAMNet 분류 결과 즉시 표시
+            if mediapipe_results:
+                top_10 = self.classifier.get_top_predictions(mediapipe_results, top_k=10)
                 print("   🤖 YAMNet 실시간 분류 결과 (Top 10):")
                 for i, pred in enumerate(top_10, 1):
                     print(f"     {i:2}. {pred['category_name']:<25} {pred['score']:.1%}")
-                    
+
                 # 차량 관련만 별도 표시
-                vehicle_sounds = self.classifier.filter_vehicle_sounds(mediapipe_results_original)
+                vehicle_sounds = self.classifier.filter_vehicle_sounds(mediapipe_results)
                 if vehicle_sounds:
                     print("   🚗 차량 관련 소리:")
                     for sound in vehicle_sounds[:3]:
                         print(f"     - {sound['category_name']}: {sound['score']:.1%}")
                 else:
                     print("   ❌ 차량 관련 소리 감지되지 않음")
-            
-            # 필터링된 오디오로도 분류 시도
-            if voice_analysis['voice_detected'] and len(processed_audio) > 0:
-                mediapipe_results_filtered = self.classifier.classify_audio(processed_audio, sample_rate)
-                # 두 결과 중 차량 관련 소음이 더 잘 감지된 것 선택
-                vehicle_sounds_original = self.classifier.filter_vehicle_sounds(mediapipe_results_original)
-                vehicle_sounds_filtered = self.classifier.filter_vehicle_sounds(mediapipe_results_filtered)
-                
-                if len(vehicle_sounds_filtered) > len(vehicle_sounds_original):
-                    print("✅ 필터링된 오디오에서 더 나은 결과 감지")
-                    mediapipe_results = mediapipe_results_filtered
-                    analysis_audio = processed_audio
-                else:
-                    mediapipe_results = mediapipe_results_original  
-                    analysis_audio = audio_data
+
+            # 2. Embedding 추출 (Custom classifier용)
+            # 주의: extract_embedding() 내부에서 오디오 특성도 함께 추출됨
+            embedding = None
+            if self.diagnoser.mode == "custom":
+                print("특성 벡터 추출 중...")
+                embedding = self.classifier.extract_embedding(audio_data, sample_rate)
+
+            # 3. 진단 수행
+            if self.comparison_mode:
+                print(f"자동차 소음 진단 중... (비교 모드: Baseline + Custom)")
             else:
-                mediapipe_results = mediapipe_results_original
-                analysis_audio = audio_data
-            
-            # 4. 오디오 특성 추출
-            print("오디오 특성 추출 중...")
-            audio_features = self.preprocessor.extract_features(analysis_audio, sample_rate)
-            engine_patterns = self.preprocessor.detect_engine_patterns(analysis_audio, sample_rate)
-            
-            # 특성 병합
-            audio_features.update(engine_patterns)
-            audio_features.update(voice_analysis)  # 음성 분석 결과도 포함
-            
-            # 5. 진단 수행
-            print("자동차 소음 진단 중...")
-            diagnosis = self.diagnoser.diagnose(audio_features, mediapipe_results)
-            
-            # 6. 결과 정리
+                print(f"자동차 소음 진단 중... (모드: {self.diagnoser.mode})")
+
+            diagnosis = self.diagnoser.diagnose(
+                {},  # audio_features는 사용되지 않음 (embedding에 포함됨)
+                mediapipe_results,
+                embedding=embedding,
+                comparison_mode=self.comparison_mode
+            )
+
+            # 5. 결과 정리
+            rms_level = float(np.sqrt(np.mean(audio_data**2)))
+
             result = {
                 'timestamp': time.time(),
                 'audio_info': {
                     'duration': len(audio_data) / sample_rate,
                     'sample_rate': sample_rate,
-                    'rms_level': audio_features.get('rms', 0),
-                    'voice_detected': voice_analysis['voice_detected'],
-                    'audio_type': voice_analysis['audio_type']
+                    'rms_level': rms_level
                 },
                 'mediapipe_results': mediapipe_results,
-                'audio_features': audio_features,
                 'diagnosis': diagnosis,
-                'voice_analysis': voice_analysis,
-                'filtering_applied': voice_analysis['voice_detected'],
                 'success': True
             }
             
@@ -216,12 +203,18 @@ class CarNoiseDiagnosisSystem:
         if not result.get('success', False):
             print(f"❌ 오류: {result.get('error', '알 수 없는 오류')}")
             return
-            
+
+        diagnosis = result['diagnosis']
+
+        # Check if comparison mode
+        if diagnosis.get('mode') == 'comparison':
+            self._print_comparison_report(result)
+            return
+
         print("\n" + "="*60)
         print("🚗 자동차 소음 진단 결과")
         print("="*60)
-        
-        diagnosis = result['diagnosis']
+
         audio_info = result['audio_info']
         
         # 기본 정보
@@ -230,15 +223,7 @@ class CarNoiseDiagnosisSystem:
         print(f"   - 샘플링 레이트: {audio_info['sample_rate']} Hz")
         print(f"   - 음량 레벨: {audio_info['rms_level']:.3f}")
         print(f"   - 진단 신뢰도: {diagnosis['confidence']:.1%}")
-        
-        # 음향 환경 정보
-        if 'voice_detected' in audio_info:
-            voice_status = "🎤 감지됨" if audio_info['voice_detected'] else "❌ 없음"
-            print(f"   - 음성: {voice_status}")
-            print(f"   - 음향 타입: {audio_info['audio_type']}")
-            if result.get('filtering_applied'):
-                print(f"   - 🔧 배경 소음 필터링 적용됨")
-        
+
         # 전체 상태
         status = diagnosis['overall_status']
         status_emoji = {
@@ -259,7 +244,7 @@ class CarNoiseDiagnosisSystem:
         
         # 감지된 소리
         if diagnosis['detected_sounds']:
-            print(f"\n🔊 차량 관련 소리 필터링 결과:")
+            print(f"\n🔊 차량 관련 소리 감지 결과:")
             for sound in diagnosis['detected_sounds'][:5]:  # Top 5
                 print(f"   - {sound['part']}: {sound['sound_type']} ({sound['confidence']:.1%})")
         else:
@@ -337,29 +322,136 @@ class CarNoiseDiagnosisSystem:
         else:
             print("✅ 이상 없음")
 
+    def _print_comparison_report(self, result: dict):
+        """비교 모드 진단 결과 출력 (Baseline vs Custom)"""
+        diagnosis = result['diagnosis']
+        audio_info = result['audio_info']
+        baseline = diagnosis['baseline']
+        custom = diagnosis['custom']
+        metrics = diagnosis['comparison_metrics']
+
+        print("\n" + "="*70)
+        print("🚗 자동차 소음 진단 결과 (비교 모드)")
+        print("="*70)
+
+        # 기본 정보
+        print(f"📊 분석 정보:")
+        print(f"   - 분석 시간: {audio_info['duration']:.1f}초")
+        print(f"   - 샘플링 레이트: {audio_info['sample_rate']} Hz")
+        print(f"   - 음량 레벨: {audio_info['rms_level']:.3f}")
+
+        print("\n" + "-"*70)
+
+        # Baseline 결과
+        print("📌 YAMNet Baseline (범용 모델)")
+        print("-"*70)
+
+        status_emoji = {
+            CarPartStatus.NORMAL: "✅",
+            CarPartStatus.WARNING: "⚠️",
+            CarPartStatus.CRITICAL: "🚨"
+        }
+
+        baseline_status = baseline['overall_status']
+        print(f"   상태: {status_emoji.get(baseline_status, '❓')} {baseline_status.value}")
+        print(f"   신뢰도: {baseline['confidence']:.1%}")
+
+        if baseline['issues']:
+            print(f"   문제:")
+            for issue in baseline['issues'][:2]:
+                print(f"     - [{issue['part']}] {issue['description']}")
+        else:
+            print(f"   문제: 감지되지 않음")
+
+        print("\n" + "-"*70)
+
+        # Custom 결과
+        print("🎯 Custom Model (자동차 특화 학습 모델)")
+        print("-"*70)
+
+        custom_status = custom['overall_status']
+        print(f"   상태: {status_emoji.get(custom_status, '❓')} {custom_status.value}")
+        print(f"   신뢰도: {custom['confidence']:.1%}")
+
+        if custom['issues']:
+            print(f"   문제:")
+            for issue in custom['issues'][:2]:
+                print(f"     - [{issue['part']}] {issue['description']}")
+        else:
+            print(f"   문제: 감지되지 않음")
+
+        print("\n" + "-"*70)
+
+        # 비교 분석
+        print("📈 비교 분석")
+        print("-"*70)
+
+        conf_diff = metrics['confidence_improvement']
+        if conf_diff > 0:
+            print(f"   ✅ Custom 모델이 {conf_diff:.1%}p 더 확신합니다")
+        elif conf_diff < 0:
+            print(f"   ⚠️  Baseline이 {abs(conf_diff):.1%}p 더 확신합니다")
+        else:
+            print(f"   ➡️  두 모델의 신뢰도가 동일합니다")
+
+        if metrics['predictions_agree']:
+            print(f"   ✅ 두 모델의 진단이 일치합니다")
+        else:
+            print(f"   ⚠️  두 모델의 진단이 다릅니다")
+
+        # 추천
+        print(f"\n💡 추천:")
+        if custom['confidence'] > baseline['confidence'] + 0.1:
+            print(f"   → Custom 모델 결과를 우선적으로 참고하세요 (신뢰도 높음)")
+        elif baseline['confidence'] > custom['confidence'] + 0.1:
+            print(f"   → Baseline 결과를 참고하세요 (Custom 모델 불확실)")
+        else:
+            print(f"   → 두 모델 모두 참고하세요 (신뢰도 유사)")
+
+        if custom['recommendations']:
+            print(f"\n📋 조치 사항:")
+            for rec in custom['recommendations'][:3]:
+                print(f"   - {rec}")
+
+        print("\n" + "="*70)
+
 
 def main():
-    print("🚗 자동차 소음 진단 시스템 v1.0")
-    print("MediaPipe YAMNet 기반")
+    print("🚗 자동차 소음 진단 시스템 v2.0")
+    print("YAMNet 기반 지능형 진단")
     print("-" * 40)
-    
+
     # 디버그 모드 선택
     try:
         debug_choice = input("디버그 모드 (YAMNet 분류 상세 보기)? (y/N): ").lower().strip().replace('\r', '')
         debug_mode = debug_choice in ['y', 'yes']
     except (KeyboardInterrupt, EOFError):
         debug_mode = False
-    
-    system = CarNoiseDiagnosisSystem(debug_mode=debug_mode)
-    
+
+    # 비교 모드 선택 (Custom 모델 있을 때만)
+    comparison_mode = False
+    custom_model_path = Path(__file__).parent / "data" / "models" / "car_classifier.pkl"
+    if custom_model_path.exists():
+        try:
+            comp_choice = input("비교 모드 (Baseline vs Custom 동시 비교)? (y/N): ").lower().strip().replace('\r', '')
+            comparison_mode = comp_choice in ['y', 'yes']
+        except (KeyboardInterrupt, EOFError):
+            comparison_mode = False
+
+    system = CarNoiseDiagnosisSystem(debug_mode=debug_mode, comparison_mode=comparison_mode)
+
     while True:
         print("\n선택하세요:")
         print("1. 연속 실시간 분석 (Ctrl+C로 중단)")
         print("2. 단발 실시간 분석 (5초)")
         print("3. 오디오 파일 분석")
-        print("4. 종료")
-        
-        choice = input("\n입력 (1-4): ").strip().replace('\r', '')
+        if system.diagnoser.mode == "custom" and not comparison_mode:
+            print("4. 비교 모드 ON/OFF (현재: OFF)")
+        elif system.diagnoser.mode == "custom" and comparison_mode:
+            print("4. 비교 모드 ON/OFF (현재: ON)")
+        print("5. 종료")
+
+        choice = input("\n입력 (1-5): ").strip().replace('\r', '')
         
         if choice == '1':
             print("\n" + "-" * 40)
@@ -378,11 +470,20 @@ def main():
                 system.print_diagnosis_report(result)
             else:
                 print("❌ 파일을 찾을 수 없습니다.")
-                
+
         elif choice == '4':
+            # Toggle comparison mode
+            if system.diagnoser.mode == "custom":
+                system.comparison_mode = not system.comparison_mode
+                status = "ON" if system.comparison_mode else "OFF"
+                print(f"✅ 비교 모드: {status}")
+            else:
+                print("❌ Custom 모델이 없어 비교 모드를 사용할 수 없습니다.")
+
+        elif choice == '5':
             print("프로그램을 종료합니다.")
             break
-            
+
         else:
             print("❌ 잘못된 선택입니다.")
 

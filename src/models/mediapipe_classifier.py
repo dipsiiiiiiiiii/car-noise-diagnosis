@@ -139,23 +139,95 @@ class MediaPipeAudioClassifier:
             'exhaust', 'diesel', 'truck', 'motorcycle', 'scooter', 'bus',
             'traffic', 'road', 'highway', 'automotive', 'mechanical'
         ]
-        
+
         vehicle_sounds = []
         all_categories = []
-        
+
         for classification in classifications:
             for category in classification['categories']:
                 all_categories.append(category)
-                
+
         for category in all_categories:
             category_name = category['category_name'].lower()
             display_name = category.get('display_name', '').lower()
-            
-            if any(keyword in category_name or keyword in display_name 
+
+            if any(keyword in category_name or keyword in display_name
                    for keyword in vehicle_keywords):
                 vehicle_sounds.append(category)
-                
+
         return sorted(vehicle_sounds, key=lambda x: x['score'], reverse=True)
+
+    def extract_embedding(self, audio_data: np.ndarray, sample_rate: int = 16000) -> Optional[np.ndarray]:
+        """Extract feature embedding from audio for custom classifier
+
+        Returns a fixed-size feature vector combining YAMNet predictions and audio features.
+        This can be used as input to a custom classifier.
+
+        Args:
+            audio_data: Audio data as numpy array
+            sample_rate: Sample rate of audio
+
+        Returns:
+            Feature vector (numpy array) or None if extraction fails
+        """
+        try:
+            # Get YAMNet classification results
+            classifications = self.classify_audio(audio_data, sample_rate)
+
+            if not classifications:
+                return None
+
+            # Extract top prediction scores as features (top 50 classes)
+            all_categories = []
+            for classification in classifications:
+                for category in classification['categories']:
+                    all_categories.append(category)
+
+            # Sort by score and take top 50
+            all_categories.sort(key=lambda x: x['score'], reverse=True)
+            top_scores = [cat['score'] for cat in all_categories[:50]]
+
+            # Pad if less than 50
+            while len(top_scores) < 50:
+                top_scores.append(0.0)
+
+            yamnet_features = np.array(top_scores)
+
+            # Combine with audio features from preprocessor
+            preprocessor = AudioPreprocessor()
+            audio_features = preprocessor.extract_features(audio_data, sample_rate)
+            engine_features = preprocessor.detect_engine_patterns(audio_data, sample_rate)
+
+            # Combine all features into single vector
+            feature_vector = []
+
+            # YAMNet top 50 scores
+            feature_vector.extend(yamnet_features)
+
+            # Audio features (in specific order for consistency)
+            feature_keys = [
+                'rms', 'zero_crossing_rate',
+                'spectral_centroid_mean', 'spectral_centroid_std',
+                'spectral_rolloff_mean',
+                'low_freq_energy', 'mid_freq_energy', 'high_freq_energy',
+                'dominant_frequency',
+                'low_freq_ratio', 'mid_freq_ratio', 'high_freq_ratio'
+            ]
+
+            for key in feature_keys:
+                val = audio_features.get(key) or engine_features.get(key) or 0.0
+                feature_vector.append(val)
+
+            # Add MFCC features (13 mean + 13 std = 26 features)
+            for i in range(1, 14):
+                feature_vector.append(audio_features.get(f'mfcc_{i}_mean', 0.0))
+                feature_vector.append(audio_features.get(f'mfcc_{i}_std', 0.0))
+
+            return np.array(feature_vector, dtype=np.float32)
+
+        except Exception as e:
+            print(f"임베딩 추출 오류: {e}")
+            return None
 
 
 class AudioPreprocessor:
