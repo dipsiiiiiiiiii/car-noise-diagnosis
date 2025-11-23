@@ -1,0 +1,12 @@
+# Raspberry Pi용 최소 의존성
+# 시각화 라이브러리 제외 (헤드리스 환경)
+
+mediapipe==0.10.21
+numpy>=1.21.0
+soundfile>=0.12.1
+librosa>=0.9.2
+scipy>=1.7.0
+scikit-learn>=1.0.0
+
+# PyAudio는 시스템 패키지로 설치 (portaudio19-dev 필요)
+# opencv-python, matplotlib, seaborn은 실시간 모니터링에 불필요
