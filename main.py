@@ -387,10 +387,8 @@ class CarNoiseDiagnosisSystem:
                     if self.comparison_mode and window_results:
                         # 위험도에 따른 상태 결정 함수
                         def get_status(risk_score):
-                            if risk_score >= 75:
+                            if risk_score >= 50:
                                 return "🚨 경고"
-                            elif risk_score >= 60:
-                                return "⚠️ 주의"
                             else:
                                 return "✅ 정상"
 
@@ -425,7 +423,7 @@ class CarNoiseDiagnosisSystem:
 
                         # 기준 설명 (마지막에 한 번만)
                         if not self.debug_mode:
-                            print(f"                [기준: 75점 이상 경고]")
+                            print(f"                [기준: 50점 이상 경고]")
                         print()  # 각 진단 사이 공백
 
                 except KeyboardInterrupt:
